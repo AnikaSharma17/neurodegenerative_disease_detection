@@ -1,0 +1,14 @@
+# Ignore virtual environment
+venv/
+
+# Ignore model weights
+*.pth
+
+# Ignore zip datasets
+*.zip
+
+# Ignore cache and temporary files
+__pycache__/
+*.pyc
+*.pyo
+*.log
