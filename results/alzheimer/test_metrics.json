@@ -1,0 +1,174 @@
+{
+  "disease": "alzheimer",
+  "arch": "multitask",
+  "backbone": "efficientnet_b0",
+  "seed": 2,
+  "seg_weight": 1.0,
+  "split_level": "group",
+  "pretrained": true,
+  "class_weighting": true,
+  "image_size": 224,
+  "best_epoch": 2,
+  "epochs_run": 10,
+  "best_val_macro_f1": 0.39543143398873304,
+  "train_seconds": 172.79925966262817,
+  "test_loss": 1.2702111303806305,
+  "test": {
+    "n": 1024,
+    "accuracy": 0.640625,
+    "balanced_accuracy": 0.47121212121212125,
+    "macro_precision": 0.45187578202528367,
+    "macro_recall": 0.47121212121212125,
+    "macro_f1": 0.45941633169361884,
+    "per_class": {
+      "NonDemented": {
+        "precision": 0.7161410018552876,
+        "recall": 0.8041666666666667,
+        "f1": 0.7576054955839058,
+        "support": 480
+      },
+      "VeryMildDemented": {
+        "precision": 0.5913621262458472,
+        "recall": 0.5056818181818182,
+        "f1": 0.5451761102603369,
+        "support": 352
+      },
+      "MildDemented": {
+        "precision": 0.5,
+        "recall": 0.575,
+        "f1": 0.5348837209302325,
+        "support": 160
+      },
+      "ModerateDemented": {
+        "precision": null,
+        "recall": 0.0,
+        "f1": 0.0,
+        "support": 32
+      }
+    }
+  },
+  "test_ci95": {
+    "accuracy": [
+      0.509716796875,
+      0.7578125
+    ],
+    "balanced_accuracy": [
+      0.3839767556662088,
+      0.7198596455627706
+    ],
+    "macro_f1": [
+      0.353449419968788,
+      0.7010656780946154
+    ]
+  },
+  "test_patient_level": {
+    "n": 32,
+    "accuracy": 0.6875,
+    "balanced_accuracy": 0.503030303030303,
+    "macro_precision": 0.4911764705882353,
+    "macro_recall": 0.503030303030303,
+    "macro_f1": 0.4959821428571428,
+    "per_class": {
+      "NonDemented": {
+        "precision": 0.7647058823529411,
+        "recall": 0.8666666666666667,
+        "f1": 0.8125,
+        "support": 15
+      },
+      "VeryMildDemented": {
+        "precision": 0.6,
+        "recall": 0.5454545454545454,
+        "f1": 0.5714285714285713,
+        "support": 11
+      },
+      "MildDemented": {
+        "precision": 0.6,
+        "recall": 0.6,
+        "f1": 0.6,
+        "support": 5
+      },
+      "ModerateDemented": {
+        "precision": null,
+        "recall": 0.0,
+        "f1": 0.0,
+        "support": 1
+      }
+    }
+  },
+  "test_patient_confusion_matrix": [
+    [
+      13,
+      1,
+      1,
+      0
+    ],
+    [
+      4,
+      6,
+      1,
+      0
+    ],
+    [
+      0,
+      2,
+      3,
+      0
+    ],
+    [
+      0,
+      1,
+      0,
+      0
+    ]
+  ],
+  "test_segmentation": {
+    "mean_iou": 0.6139747123237685,
+    "fg_iou": 0.387816403696628,
+    "fg_dice": 0.5588871880511413
+  },
+  "test_confusion_matrix": [
+    [
+      386,
+      51,
+      43,
+      0
+    ],
+    [
+      132,
+      178,
+      42,
+      0
+    ],
+    [
+      21,
+      47,
+      92,
+      0
+    ],
+    [
+      0,
+      25,
+      7,
+      0
+    ]
+  ],
+  "calibration": {
+    "temperature": 1.9848980903625488,
+    "ece_before": 0.059349612187361345,
+    "ece_after": 0.13160505704581738,
+    "aurc": 0.27384378207778937,
+    "risk_at_50pct_coverage": 0.26953125,
+    "risk_at_80pct_coverage": 0.31868131868131866,
+    "risk_at_90pct_coverage": 0.3311617806731813
+  },
+  "split_sizes": {
+    "train": 4384,
+    "val": 992,
+    "test": 1024
+  },
+  "split_groups": {
+    "train": 137,
+    "val": 31,
+    "test": 32
+  }
+}
