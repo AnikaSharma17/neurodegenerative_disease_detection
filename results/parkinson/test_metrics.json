@@ -1,0 +1,118 @@
+{
+  "disease": "parkinson",
+  "arch": "multitask",
+  "backbone": "efficientnet_b0",
+  "seed": 1,
+  "seg_weight": 1.0,
+  "split_level": "group",
+  "pretrained": true,
+  "class_weighting": true,
+  "image_size": 224,
+  "best_epoch": 10,
+  "epochs_run": 18,
+  "best_val_macro_f1": 0.43957116875658087,
+  "train_seconds": 84.50263381004333,
+  "test_loss": 0.23731680340077504,
+  "test": {
+    "n": 166,
+    "accuracy": 0.9759036144578314,
+    "balanced_accuracy": 0.9789473684210526,
+    "macro_precision": 0.9733333333333334,
+    "macro_recall": 0.9789473684210526,
+    "macro_f1": 0.9755486816909706,
+    "per_class": {
+      "normal": {
+        "precision": 1.0,
+        "recall": 0.9578947368421052,
+        "f1": 0.978494623655914,
+        "support": 95
+      },
+      "parkinson": {
+        "precision": 0.9466666666666667,
+        "recall": 1.0,
+        "f1": 0.9726027397260273,
+        "support": 71
+      }
+    }
+  },
+  "test_ci95": {
+    "accuracy": [
+      0.9135017626321974,
+      1.0
+    ],
+    "balanced_accuracy": [
+      0.9333333333333333,
+      1.0
+    ],
+    "macro_f1": [
+      0.8526585522101218,
+      1.0
+    ]
+  },
+  "test_patient_level": {
+    "n": 5,
+    "accuracy": 1.0,
+    "balanced_accuracy": 1.0,
+    "macro_precision": 1.0,
+    "macro_recall": 1.0,
+    "macro_f1": 1.0,
+    "per_class": {
+      "normal": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "support": 2
+      },
+      "parkinson": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "support": 3
+      }
+    }
+  },
+  "test_patient_confusion_matrix": [
+    [
+      2,
+      0
+    ],
+    [
+      0,
+      3
+    ]
+  ],
+  "test_segmentation": {
+    "mean_iou": 0.5539976337825885,
+    "fg_iou": 0.17242678026970304,
+    "fg_dice": 0.2941365434010954
+  },
+  "test_confusion_matrix": [
+    [
+      91,
+      4
+    ],
+    [
+      0,
+      71
+    ]
+  ],
+  "calibration": {
+    "temperature": 10.125049591064453,
+    "ece_before": 0.0404286890862936,
+    "ece_after": 0.36209395635558894,
+    "aurc": 0.0008118700182134712,
+    "risk_at_50pct_coverage": 0.0,
+    "risk_at_80pct_coverage": 0.0,
+    "risk_at_90pct_coverage": 0.0
+  },
+  "split_sizes": {
+    "train": 419,
+    "val": 246,
+    "test": 166
+  },
+  "split_groups": {
+    "train": 9,
+    "val": 4,
+    "test": 5
+  }
+}
