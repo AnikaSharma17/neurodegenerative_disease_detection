@@ -21,6 +21,9 @@ class DiseaseConfig:
     # CSV (columns: image, group) mapping "<class>/<file>" to a patient group.
     # Takes precedence over group_regex. Produced by ``python -m neurodx.grouping``.
     groups_file: str | None = None
+    # If True the group ignores the class folder, so one subject scanned under two
+    # diagnoses (e.g. MCI, later AD) still lands in a single split.
+    group_across_classes: bool = False
 
 
 DISEASES: dict[str, DiseaseConfig] = {
@@ -40,5 +43,28 @@ DISEASES: dict[str, DiseaseConfig] = {
         classes=("normal", "parkinson"),
         # Files look like <series-name>_<slice>.png; keep each series in one split.
         group_regex=r"^(.*)_\d+\.\w+$",
+    ),
+    # 3D datasets with real subject IDs, converted by preprocessing/prepare_volumes.py
+    # into <subject>__<scan>_s<k>.png. They need a data-use agreement; see data/README.md.
+    "oasis": DiseaseConfig(
+        name="oasis",
+        image_root="data/oasis/mri",
+        mask_root="data/oasis/masks",
+        classes=("NonDemented", "VeryMildDemented", "MildDemented", "ModerateDemented"),
+        group_regex=r"^(.*?)__", group_across_classes=True,
+    ),
+    "adni": DiseaseConfig(
+        name="adni",
+        image_root="data/adni/mri",
+        mask_root="data/adni/masks",
+        classes=("CN", "MCI", "AD"),
+        group_regex=r"^(.*?)__", group_across_classes=True,
+    ),
+    "ppmi": DiseaseConfig(
+        name="ppmi",
+        image_root="data/ppmi/mri",
+        mask_root="data/ppmi/masks",
+        classes=("Control", "PD"),
+        group_regex=r"^(.*?)__", group_across_classes=True,
     ),
 }
