@@ -1,0 +1,3 @@
+# Optional: 3D volume preparation (preprocessing/prepare_volumes.py).
+# SynthSeg ships with FreeSurfer >= 7.3; FastSurfer runs from its Docker image.
+nibabel>=5.2
