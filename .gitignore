@@ -1,14 +1,58 @@
-# Ignore virtual environment
-venv/
-
-# Ignore model weights
-*.pth
-
-# Ignore zip datasets
+# ---- Datasets (download separately; see README) ----
+data/*
+!data/README.md
 *.zip
+*.tar
+*.tar.gz
+*.nii
+*.nii.gz
+*.dcm
 
-# Ignore cache and temporary files
+# ---- Model weights / checkpoints ----
+*.pth
+*.pt
+*.ckpt
+*.onnx
+*.safetensors
+checkpoints/
+
+# ---- Run outputs (curated results live in results/) ----
+runs/
+outputs/
+mlruns/
+wandb/
+lightning_logs/
+/*.csv
+/*.png
+
+# ---- Python ----
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# ---- Environments & secrets ----
+venv/
+.venv/
+env/
+.env
+.env.*
+
+# ---- Editors / OS ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- Logs ----
 *.log
