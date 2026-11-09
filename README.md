@@ -20,7 +20,10 @@ confidence.
    correlation > 0.97 recovers **200 patients × 32 slices**. On the 1,252 files that
    carry a patient ID in their name, precision and recall are both 1.000
    ([neurodx/grouping.py](neurodx/grouping.py)).
-3. **Strong-looking results can be confounded.** Parkinson reaches 0.93 patient-level
+3. **Cross-validation confirms it.** With 5-fold patient-level CV (all 200 patients tested
+   once), the CNN and the histogram baseline differ by **+0.001 macro-F1** (95% CI −0.06 to
+   +0.06). Pooling all slices of a patient with attention-MIL does not help either.
+4. **Strong-looking results can be confounded.** Parkinson reaches 0.93 patient-level
    accuracy. But each class comes from a different scanner vendor, and only **46%** of the
    Grad-CAM attention falls inside the head.
 
@@ -77,6 +80,28 @@ How to read the table:
 - ModerateDemented recall is about 0, because only 2 patients exist (1 in train, 1 in test).
 - Models peak at epoch 1–9 and then overfit.
 
+### Alzheimer: 5-fold patient-level cross-validation (all 200 patients)
+
+A single test split holds only 32 patients, so its numbers swing by ±0.07 between seeds.
+Cross-validation tests every patient once and pools the predictions. The full tables are
+in [results/CV_RESULTS.md](results/CV_RESULTS.md), which `python scripts/run_cv.py`
+regenerates.
+
+| Method | Patient macro-F1 | 95% CI | Patient bal. acc. |
+|---|---|---|---|
+| Majority class | 0.167 | 0.15–0.23 | 0.250 |
+| LogReg on intensity histogram | 0.343 | 0.29–0.49 | 0.360 |
+| LogReg on 32×32 thumbnail | 0.297 | 0.25–0.43 | 0.298 |
+| EfficientNet-B0, slice probabilities averaged per patient | 0.344 | 0.29–0.49 | 0.354 |
+| EfficientNet-B0, attention-MIL over all slices | 0.292 | 0.24–0.42 | 0.308 |
+
+Paired bootstrap on the same patients:
+
+- CNN minus histogram baseline: +0.001 (95% CI −0.06 to +0.06).
+- MIL minus CNN: −0.054 (−0.12 to +0.01).
+
+Neither deep model beats a logistic regression on the grey-level histogram.
+
 ### Parkinson: series-level split (18 series)
 
 | Model | Slice macro-F1 | Patient (series) acc. | Grad-CAM mass inside head |
@@ -84,7 +109,9 @@ How to read the table:
 | LogReg on thumbnail | 0.625 ± 0.313 | 0.511 ± 0.252 | – |
 | EfficientNet-B0, multi-task | 0.805 ± 0.208 | 0.933 ± 0.115 | 0.46 ± 0.07 (Alzheimer: 0.79) |
 
-Do not read this as disease detection. The classes differ by scanner vendor, the test set
+Under 5-fold CV, a logistic regression on 32×32 thumbnails matches the CNN (0.887 vs
+0.883 macro-F1). Coarse global appearance is enough to separate the classes. Do not read
+this as disease detection. The classes differ by scanner vendor, the test set
 is a handful of series, and the model mostly attends outside the brain
 ([gallery](results/parkinson/gradcam_gallery.png)).
 
@@ -119,9 +146,10 @@ neurodx/            package
   inference.py      checkpoint loading, prediction, Grad-CAM
   predict.py        CLI inference
   explain.py        Grad-CAM gallery and attention-in-head score
+  mil.py            attention-MIL patient-level model
   serve.py          FastAPI app with upload page
-preprocessing/      generate_masks.py (pseudo-masks)
-scripts/            run_experiments.py, baselines.py, make_report.py
+preprocessing/      generate_masks.py (pseudo-masks), prepare_volumes.py (OASIS/ADNI/PPMI + SynthSeg/FastSurfer)
+scripts/            run_experiments.py, run_cv.py, baselines.py, make_report.py
 metadata/           alzheimer_groups.csv (recovered patient IDs)
 results/            curated figures and RESULTS.md
 tests/              pytest suite (CPU, synthetic data, no downloads)
@@ -153,6 +181,10 @@ python -m neurodx.explain --run runs/alzheimer/multitask_efficientnet_b0_seg1_gr
 python scripts/run_experiments.py   # full matrix: 21 runs, about 2 h on one GPU, resumable
 python scripts/baselines.py --disease alzheimer --split-level group
 python scripts/make_report.py       # writes results/RESULTS.md
+
+python -m neurodx.train --disease alzheimer --cv-folds 5 --fold 0   # one CV fold
+python -m neurodx.mil --disease alzheimer --cv-folds 5 --fold 0     # attention-MIL, one fold
+python scripts/run_cv.py            # all folds, both models, baselines -> results/CV_RESULTS.md
 
 python -m neurodx.predict --checkpoint runs/.../best.pt img1.jpg img2.jpg --cam-dir cams/
 pytest
@@ -187,6 +219,13 @@ docker build -t neurodx .
 docker run -p 8000:8000 -v "$PWD/models:/models:ro" neurodx    # expects models/best.pt
 ```
 
+This was smoke-tested with the Alzheimer checkpoint:
+
+- The health check reports healthy, and the container runs as a non-root user.
+- `/predict` returns calibrated probabilities and a Grad-CAM overlay, and abstains below
+  0.6 confidence.
+- A non-image upload gets a 415.
+
 ## Evaluation protocol
 
 - **Split:** seeded, stratified, 70/15/15. Whole patients (Alzheimer) or series (Parkinson)
@@ -198,11 +237,21 @@ docker run -p 8000:8000 -v "$PWD/models:/models:ro" neurodx    # expects models/
   probabilities), a patient-bootstrap CI, ECE before and after temperature scaling, and
   selective-prediction risk at 50/80/90% coverage.
 
+## Larger datasets
+
+OASIS-1, ADNI and PPMI provide subject IDs and full 3D volumes.
+`preprocessing/prepare_volumes.py` converts them into this repo's format and can add
+anatomical masks from SynthSeg or FastSurfer. The datasets need a data-use agreement, so
+you must download them yourself. Configs `oasis`, `adni` and `ppmi` are ready; see
+[data/README.md](data/README.md). The pipeline is tested on synthetic volumes only.
+
 ## Limitations
 
 - **Small:** 200 Alzheimer patients; ModerateDemented is 2 people. The Parkinson set is
   about 18 series from what looks like two exams.
 - **Unknown provenance:** the Alzheimer data matches the Kaggle "Augmented Alzheimer MRI"
   set, derived from OASIS. The Parkinson source is undocumented.
-- **Not anatomical:** the pseudo-masks mark bright pixels, not anatomy or lesions.
-- **2D only:** each slice is classified independently; there is no 3D context.
+- **Not anatomical:** the pseudo-masks mark bright pixels, not anatomy or lesions. Real
+  masks need the OASIS/ADNI/PPMI pipeline.
+- **Not 3D:** each slice is classified on its own. The attention-MIL model pools a
+  patient's slices, but it has no true 3D convolutions.
