@@ -36,6 +36,8 @@ def load_runs(root: Path, disease: str) -> dict[tuple, list[dict]]:
     groups = defaultdict(list)
     for f in sorted((root / disease).glob("*/test_metrics.json")):
         r = json.loads(f.read_text())
+        if r.get("cv_folds") or r.get("arch") == "mil":
+            continue  # cross-validation runs are summarised by scripts/run_cv.py
         r["_dir"] = f.parent
         groups[config_key(r)].append(r)
     return groups
