@@ -40,7 +40,8 @@ def plot_history(history: list[dict], path: str | Path) -> None:
     a.set_xlabel("epoch")
     a.legend()
     for key in ("train_macro_f1", "val_macro_f1", "val_bal_acc", "val_fg_dice"):
-        b.plot(ep, [h[key] for h in history], label=key)
+        if key in history[0]:
+            b.plot(ep, [h[key] for h in history], label=key)
     b.set_title("Metrics")
     b.set_xlabel("epoch")
     b.legend()
