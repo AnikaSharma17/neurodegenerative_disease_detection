@@ -24,7 +24,7 @@ from torch.utils.data import DataLoader
 
 from .calibration import expected_calibration_error, fit_temperature, risk_coverage
 from .config import DISEASES, NUM_SEG_CLASSES
-from .data import MRIDataset, check_no_group_leakage, collect_samples, save_split, split_samples
+from .data import MRIDataset, check_no_group_leakage, collect_samples, kfold_split, save_split, split_samples
 from .metrics import (
     aggregate_by_group,
     classification_metrics,
@@ -56,6 +56,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--val-frac", type=float, default=0.15)
     p.add_argument("--test-frac", type=float, default=0.15)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--cv-folds", type=int, default=0,
+                   help="Patient-level k-fold CV: test on fold --fold, validate on part of the rest (0 = off).")
+    p.add_argument("--fold", type=int, default=0)
     p.add_argument("--num-workers", type=int, default=2)
     p.add_argument("--no-pretrained", action="store_true", help="Random init (offline/smoke tests).")
     p.add_argument("--data-root", default=".", help="Directory that contains data/.")
@@ -120,7 +123,14 @@ def run_epoch(model, loader, device, num_classes, seg_weight, cls_weights=None,
 
 
 def default_run_name(args: argparse.Namespace) -> str:
-    return f"{args.arch}_{args.backbone}_seg{args.seg_weight:g}_{args.split_level}_seed{args.seed}"
+    name = f"{args.arch}_{args.backbone}_seg{args.seg_weight:g}_{args.split_level}_seed{args.seed}"
+    return f"{name}_cv{args.cv_folds}f{args.fold}" if args.cv_folds else name
+
+
+def make_splits(samples, args: argparse.Namespace) -> dict:
+    if args.cv_folds:
+        return kfold_split(samples, args.cv_folds, args.fold, args.val_frac, args.seed)
+    return split_samples(samples, args.val_frac, args.test_frac, args.seed)
 
 
 def main(argv: list[str] | None = None) -> dict:
@@ -135,7 +145,7 @@ def main(argv: list[str] | None = None) -> dict:
     # ---- data ----
     samples = collect_samples(cfg, args.data_root, require_masks=args.seg_weight > 0,
                               limit_per_class=args.limit_per_class, split_level=args.split_level)
-    splits = split_samples(samples, args.val_frac, args.test_frac, args.seed)
+    splits = make_splits(samples, args)
     check_no_group_leakage(splits)
     save_split(splits, run_dir / "split.csv")
     for name in ("train", "val", "test"):
@@ -228,6 +238,7 @@ def main(argv: list[str] | None = None) -> dict:
         "disease": args.disease, "arch": args.arch, "backbone": args.backbone, "seed": args.seed,
         "seg_weight": args.seg_weight, "split_level": args.split_level, "pretrained": not args.no_pretrained,
         "class_weighting": args.class_weighting, "image_size": args.image_size,
+        "cv_folds": args.cv_folds, "fold": args.fold if args.cv_folds else None,
         "best_epoch": best_epoch, "epochs_run": len(history), "best_val_macro_f1": best_f1,
         "train_seconds": train_seconds, "test_loss": te["loss"],
         "test": classification_metrics(te["cls_cm"], cfg.classes),
