@@ -84,7 +84,10 @@ def collect_samples(
                 group = group_map[key]
             else:
                 match = group_re.match(name) if group_re else None
-                group = f"{cls}/{match.group(1)}" if match else key
+                if match:
+                    group = match.group(1) if cfg.group_across_classes else f"{cls}/{match.group(1)}"
+                else:
+                    group = key
             samples.append(Sample(str(img_dir / name), str(mask) if mask else None, label, group))
     if not samples:
         raise FileNotFoundError(f"No images found under {root / cfg.image_root}")
@@ -129,6 +132,38 @@ def split_samples(
             if dest != "train":
                 counts[dest] += len(groups[g])
             out[dest].extend(groups[g])
+    for k in SPLITS:
+        out[k].sort(key=lambda s: s.image_path)
+    return out
+
+
+def kfold_split(
+    samples: list[Sample], folds: int = 5, fold: int = 0, val_frac: float = 0.15, seed: int = 42
+) -> dict[str, list[Sample]]:
+    """Group-level stratified k-fold. Fold ``fold`` is the test set; a validation set of
+    about ``val_frac`` of all images is carved from the remaining groups. Over all folds
+    every group is tested exactly once, so pooled predictions cover the whole dataset."""
+    if not 0 <= fold < folds:
+        raise ValueError(f"fold must be in [0, {folds}), got {fold}")
+    groups: dict[str, list[Sample]] = defaultdict(list)
+    for s in samples:
+        groups[s.group].append(s)
+    by_class: dict[int, list[str]] = defaultdict(list)
+    for g, members in groups.items():
+        by_class[Counter(m.label for m in members).most_common(1)[0][0]].append(g)
+    rng = random.Random(seed)
+    fold_of: dict[str, int] = {}
+    offset = 0
+    for label in sorted(by_class):
+        gs = sorted(by_class[label])
+        rng.shuffle(gs)
+        for j, g in enumerate(gs):
+            fold_of[g] = (offset + j) % folds
+        offset += len(gs)  # continue round-robin so small classes don't all land in fold 0
+    test = [s for s in samples if fold_of[s.group] == fold]
+    rest = [s for s in samples if fold_of[s.group] != fold]
+    inner = split_samples(rest, val_frac / (1 - 1 / folds), 0.0, seed)
+    out = {"train": inner["train"] + inner["test"], "val": inner["val"], "test": test}
     for k in SPLITS:
         out[k].sort(key=lambda s: s.image_path)
     return out
