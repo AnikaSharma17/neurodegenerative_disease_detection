@@ -3,8 +3,9 @@
 Supported sources (all need you to accept the dataset's data-use agreement and
 download the data yourself; see data/README.md):
 
-  oasis1    OASIS-1 cross-sectional: subject folders OAS1_xxxx_MR1 plus
-            oasis_cross-sectional.csv (CDR 0 / 0.5 / 1 / 2 -> 4 classes)
+  oasis1    OASIS-1 cross-sectional: subject folders OAS1_xxxx_MR1 (CDR 0 / 0.5 / 1 / 2 ->
+            4 classes). Labels come from oasis_cross-sectional.csv if given, otherwise from
+            the OAS1_xxxx_MR1.txt file inside each subject folder.
   ida       ADNI or PPMI downloads from LONI IDA: the image folder plus the
             collection CSV (Image Data ID, Subject, Group, ...)
   manifest  any CSV with columns subject,label,path[,seg_path]
@@ -22,8 +23,17 @@ Masks (``--masks``):
 ``--structures`` picks which labels become the foreground: brain (all tissue),
 hippocampus, ventricles, or hippocampus+ventricles (atrophy markers in Alzheimer's).
 
-    python preprocessing/prepare_volumes.py oasis1 --src ~/oasis1 --csv oasis_cross-sectional.csv \
-        --dataset oasis --masks synthseg
+``--volume-size N`` also writes each scan as a 3D array for neurodx.cnn3d:
+``data/<dataset>/volumes/<class>/<subject>__<scan>.npz`` (``image`` uint8 N^3 and, with
+masks, ``mask``). The volume is resampled to ``--volume-fov / N`` mm voxels and cropped
+to a fixed field of view around the brain, with no per-subject rescaling, so brain size
+and atrophy stay visible to the model.
+
+Processing is resumable: scans whose outputs already exist are skipped. ``--workers``
+runs several scans at once (useful with FastSurfer on a GPU).
+
+    python preprocessing/prepare_volumes.py oasis1 --src data/raw/oasis1/extracted --dataset oasis \
+        --masks fastsurfer --structures hippocampus+ventricles --volume-size 96 --workers 2
     python preprocessing/prepare_volumes.py ida --src ~/ppmi --csv PPMI_collection.csv --dataset ppmi \
         --label-map PD=PD Control=Control --masks fastsurfer
 """
@@ -35,7 +45,8 @@ import re
 import shutil
 import subprocess
 import tempfile
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -59,6 +70,7 @@ class Scan:
     label: str
     path: Path
     seg_path: Path | None = None
+    info: dict = field(default_factory=dict)  # extra subject data (age, sex, ...) for subjects.csv
 
 
 def _nib():
@@ -74,27 +86,70 @@ def safe(name: str) -> str:
 
 
 # ---------------------------------------------------------------- manifests
-def oasis1_scans(src: Path, csv_path: Path, include_young: bool = False) -> list[Scan]:
+# OAS1_xxxx_MR1.txt keys -> oasis_cross-sectional.csv column names
+OASIS_TXT_KEYS = {"SESSION ID": "ID", "AGE": "Age", "M/F": "M/F", "HAND": "Hand", "EDUC": "Educ", "SES": "SES",
+                  "CDR": "CDR", "MMSE": "MMSE", "eTIV": "eTIV", "ASF": "ASF", "nWBV": "nWBV"}
+SUBJECT_FIELDS = ("Age", "M/F", "Educ", "SES", "CDR", "MMSE", "eTIV", "nWBV")
+
+
+def oasis1_table_from_txt(src: Path) -> list[dict]:
+    """Rebuild the OASIS-1 demographics table from the per-session text files that ship
+    inside each disc (``OAS1_0001_MR1/OAS1_0001_MR1.txt`` with lines like ``AGE: 74``)."""
+    rows = []
+    for txt in sorted(src.rglob("OAS1_*_MR*.txt")):
+        if txt.stem != txt.parent.name:  # only the session summary
+            continue
+        row = {}
+        for line in txt.read_text(errors="replace").splitlines():
+            key, _, value = line.partition(":")
+            if key.strip() in OASIS_TXT_KEYS and value.strip():
+                row[OASIS_TXT_KEYS[key.strip()]] = value.strip()
+        row.setdefault("ID", txt.stem)
+        rows.append(row)
+    return rows
+
+
+def _oasis_volume(session_dir: Path, sid: str, skull: bool) -> Path | None:
+    """Atlas-registered 1 mm image: brain-masked by default, or with ``skull`` the
+    unmasked one, which FastSurfer and SynthSeg expect as input."""
+    patterns = ([f"{sid}*_t88_gfc.img", f"{sid}*_t88_*.img"] if skull
+                else [f"{sid}*masked_gfc.img", f"{sid}*_t88_*.img"])
+    for pat in patterns:
+        hits = sorted(session_dir.rglob(pat))
+        if hits:
+            return hits[0]
+    return None
+
+
+def oasis1_scans(src: Path, csv_path: Path | None = None, include_young: bool = False,
+                 skull: bool = False) -> list[Scan]:
     """OASIS-1: one MR1 session per subject; MR2 reliability rescans are skipped so
     each person counts once. Subjects without a CDR (mostly under 60) are skipped unless
     ``include_young``, which labels them NonDemented."""
+    if csv_path is not None:
+        with csv_path.open(newline="", encoding="utf-8-sig") as f:
+            table = list(csv.DictReader(f))
+    else:
+        table = oasis1_table_from_txt(src)
+    sessions = {d.name: d for d in src.rglob("OAS1_*_MR*") if d.is_dir()}
     scans = []
-    with csv_path.open(newline="", encoding="utf-8-sig") as f:
-        for row in csv.DictReader(f):
-            sid = row["ID"].strip()
-            if not sid.endswith("_MR1"):
-                continue
-            cdr = row.get("CDR", "").strip()
-            if cdr == "" and not include_young:
-                continue
-            label = OASIS_CDR.get(float(cdr) if cdr else 0.0)
-            if label is None:
-                continue
-            hits = sorted(src.rglob(f"{sid}*masked_gfc.img")) or sorted(src.rglob(f"{sid}*_t88_*.img"))
-            if not hits:
-                continue
-            scans.append(Scan(sid.rsplit("_MR", 1)[0], sid, label, hits[0]))
-    return scans
+    for row in table:
+        sid = row["ID"].strip()
+        if not sid.endswith("_MR1") or sid not in sessions:
+            continue
+        cdr = (row.get("CDR") or "").strip()
+        missing = cdr in ("", "N/A")
+        if missing and not include_young:
+            continue
+        label = OASIS_CDR.get(0.0 if missing else float(cdr))
+        if label is None:
+            continue
+        vol = _oasis_volume(sessions[sid], sid, skull)
+        if vol is None:
+            continue
+        info = {k: (row.get(k) or "").strip() for k in SUBJECT_FIELDS}
+        scans.append(Scan(sid.rsplit("_MR", 1)[0], sid, label, vol, info=info))
+    return sorted(scans, key=lambda sc: sc.scan)
 
 
 def ida_scans(src: Path, csv_path: Path, label_map: dict[str, str], all_visits: bool = False) -> list[Scan]:
@@ -154,16 +209,33 @@ def run_synthseg(vol: Path, work: Path) -> tuple[Path, Path]:
     return res, seg  # both on SynthSeg's 1 mm grid
 
 
-def run_fastsurfer(vol: Path, work: Path, image: str, license_file: str | None) -> tuple[Path, Path]:
+def run_fastsurfer(vol: Path, work: Path, image: str, license_file: str | None,
+                   gpus: str | None = "all") -> tuple[Path, Path]:
     if not shutil.which("docker"):
         raise SystemExit("Docker is required for --masks fastsurfer.")
-    cmd = ["docker", "run", "--rm", "-v", f"{vol.parent.resolve()}:/in:ro", "-v", f"{work.resolve()}:/out"]
+    if not vol.name.lower().endswith((".nii", ".nii.gz", ".mgz")):
+        # FastSurfer reads NIfTI/MGZ; convert Analyze (.img/.hdr) first.
+        nib = _nib()
+        img = nib.load(str(vol))
+        data = np.asarray(img.dataobj)
+        data = data[..., 0] if data.ndim == 4 else data
+        (work / "in").mkdir()
+        vol = work / "in" / "t1.nii.gz"
+        nib.save(nib.Nifti1Image(data, img.affine), str(vol))
+    cmd = ["docker", "run", "--rm"]
+    if gpus:
+        cmd += ["--gpus", gpus]
+    cmd += ["-v", f"{vol.parent.resolve()}:/in:ro", "-v", f"{work.resolve()}:/out"]
     if license_file:
         cmd += ["-v", f"{Path(license_file).resolve()}:/fs_license.txt:ro"]
     cmd += [image, "--t1", f"/in/{vol.name}", "--sid", "s", "--sd", "/out", "--seg_only"]
     if license_file:
         cmd += ["--fs_license", "/fs_license.txt"]
-    subprocess.run(cmd, check=True)
+    if not gpus:
+        cmd += ["--device", "cpu"]
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        raise RuntimeError(f"FastSurfer failed ({res.returncode}): {(res.stdout + res.stderr)[-800:]}")
     mri = work / "s" / "mri"
     return mri / "orig.mgz", mri / "aparc.DKTatlas+aseg.deep.mgz"  # conformed 1 mm 256^3 grid
 
@@ -177,11 +249,46 @@ def mask_from_labels(seg: np.ndarray, structures: str) -> np.ndarray:
 
 
 # ---------------------------------------------------------------- slicing
-def load_canonical(path: Path) -> np.ndarray:
+def load_canonical(path: Path, with_zooms: bool = False):
     nib = _nib()
     img = nib.as_closest_canonical(nib.load(str(path)))
     data = np.asarray(img.dataobj, dtype=np.float32)
-    return data[..., 0] if data.ndim == 4 else data
+    data = data[..., 0] if data.ndim == 4 else data
+    zooms = tuple(float(z) for z in img.header.get_zooms()[:3])
+    return (data, zooms) if with_zooms else data
+
+
+def to_fixed_grid(vol: np.ndarray, zooms: tuple, seg: np.ndarray | None, size: int, fov: float):
+    """Resample to ``fov/size`` mm voxels and crop/pad a ``size``^3 cube centred on the brain.
+    Physical scale is preserved: a smaller (atrophied) brain stays smaller."""
+    from scipy.ndimage import zoom
+
+    spacing = fov / size
+    factors = [z / spacing for z in zooms]
+    out = zoom(vol, factors, order=1)
+    seg_out = zoom(seg, factors, order=0) if seg is not None else None
+    fg = seg_out > 0 if seg_out is not None else out > np.percentile(out, 60)
+    idx = np.argwhere(fg)
+    center = (idx.min(0) + idx.max(0)) // 2 if len(idx) else np.array(out.shape) // 2
+
+    def crop(a: np.ndarray) -> np.ndarray:
+        res = np.zeros((size,) * 3, dtype=a.dtype)
+        src, dst = [], []
+        for c, n in zip(center, a.shape):
+            lo = int(c) - size // 2
+            s0, s1 = max(lo, 0), min(lo + size, n)
+            src.append(slice(s0, s1))
+            dst.append(slice(s0 - lo, s1 - lo))
+        res[tuple(dst)] = a[tuple(src)]
+        return res
+
+    img = crop(out)
+    if seg_out is not None:
+        img = img * (crop(seg_out) > 0)  # skull-strip with the segmentation
+    inside = img[img > 0]
+    lo, hi = np.percentile(inside if inside.size else img, [1, 99])
+    img = (np.clip((img - lo) / max(hi - lo, 1e-6), 0, 1) * 255).astype(np.uint8)
+    return img, (crop(seg_out) if seg_out is not None else None)
 
 
 def pick_slices(volume: np.ndarray, n: int, margin: float = 0.1) -> list[int]:
@@ -221,7 +328,8 @@ def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("source", choices=("oasis1", "ida", "manifest"))
     p.add_argument("--src", type=Path, help="Folder with the downloaded volumes (oasis1, ida).")
-    p.add_argument("--csv", type=Path, required=True, help="OASIS CSV, IDA collection CSV, or manifest.")
+    p.add_argument("--csv", type=Path, default=None,
+                   help="IDA collection CSV or manifest (required); OASIS CSV (optional for oasis1).")
     p.add_argument("--dataset", required=True, help="Output name: data/<dataset>/mri and data/<dataset>/masks.")
     p.add_argument("--label-map", nargs="+", default=[], metavar="GROUP=CLASS",
                    help="ida: map IDA Group values to class folders, e.g. AD=AD CN=CN MCI=MCI.")
@@ -233,12 +341,20 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--structures", choices=("brain", *STRUCTURES), default="brain")
     p.add_argument("--fastsurfer-image", default="deepmi/fastsurfer:latest")
     p.add_argument("--fs-license", default=None, help="FreeSurfer license file, if your FastSurfer version needs it.")
+    p.add_argument("--fastsurfer-gpus", default="all",
+                   help="Value for docker --gpus; pass '' to run FastSurfer on the CPU.")
+    p.add_argument("--volume-size", type=int, default=0, help="Also write N^3 volumes for neurodx.cnn3d (0 = off).")
+    p.add_argument("--volume-fov", type=float, default=192.0, help="Field of view of those volumes in mm.")
+    p.add_argument("--workers", type=int, default=1, help="Scans processed in parallel.")
+    p.add_argument("--overwrite", action="store_true", help="Redo scans whose outputs already exist.")
     p.add_argument("--out-root", type=Path, default=Path("data"))
     p.add_argument("--limit", type=int, default=None, help="Debug: process only the first N scans.")
     args = p.parse_args(argv)
 
+    if args.source != "oasis1" and args.csv is None:
+        p.error(f"{args.source} needs --csv")
     if args.source == "oasis1":
-        scans = oasis1_scans(args.src, args.csv, args.include_young)
+        scans = oasis1_scans(args.src, args.csv, args.include_young, skull=args.masks in ("synthseg", "fastsurfer"))
     elif args.source == "ida":
         label_map = dict(kv.split("=", 1) for kv in args.label_map)
         if not label_map:
@@ -253,24 +369,75 @@ def main(argv: list[str] | None = None) -> None:
     if args.masks == "precomputed" and any(s.seg_path is None for s in scans):
         raise SystemExit("--masks precomputed needs a seg_path for every row of the manifest.")
 
-    out_img = args.out_root / args.dataset / "mri"
-    out_mask = None if args.masks == "none" else args.out_root / args.dataset / "masks"
-    written, counts = 0, {}
-    for i, scan in enumerate(scans, 1):
+    root = args.out_root / args.dataset
+    out_img = root / "mri"
+    out_mask = None if args.masks == "none" else root / "masks"
+    out_vol = root / "volumes" if args.volume_size else None
+    if any(sc.info for sc in scans):
+        write_subjects(scans, root / "subjects.csv")
+
+    def outputs(scan: Scan) -> list[Path]:
+        base = f"{safe(scan.subject)}__{safe(scan.scan)}"
+        paths = [out_img / scan.label / f"{base}_s00.png"]
+        if out_mask is not None:
+            paths.append(out_mask / scan.label / f"mask_{base}_s00.png")
+        if out_vol is not None:
+            paths.append(out_vol / scan.label / f"{base}.npz")
+        return paths
+
+    def process(scan: Scan) -> int:
+        if not args.overwrite and all(path.exists() for path in outputs(scan)):
+            return 0
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp)
             vol_path, seg_path = scan.path, scan.seg_path
             if args.masks == "synthseg":
                 vol_path, seg_path = run_synthseg(scan.path, work)
             elif args.masks == "fastsurfer":
-                vol_path, seg_path = run_fastsurfer(scan.path, work, args.fastsurfer_image, args.fs_license)
-            vol = load_canonical(vol_path)
+                vol_path, seg_path = run_fastsurfer(scan.path, work, args.fastsurfer_image, args.fs_license,
+                                                    args.fastsurfer_gpus or None)
+            vol, zooms = load_canonical(vol_path, with_zooms=True)
             seg = load_canonical(seg_path).round().astype(np.int32) if seg_path else None
-            written += write_slices(scan, vol, seg, out_img, out_mask, args.slices, args.structures)
-        counts[scan.label] = counts.get(scan.label, 0) + 1
-        print(f"[{i}/{len(scans)}] {scan.subject} {scan.scan} -> {scan.label}", flush=True)
-    print(f"{written} slices from {len(scans)} scans of {len({s.subject for s in scans})} subjects; "
-          f"scans per class {counts} -> {out_img}")
+            n = write_slices(scan, vol, seg, out_img, out_mask, args.slices, args.structures)
+            if out_vol is not None:
+                img3d, seg3d = to_fixed_grid(vol, zooms, seg, args.volume_size, args.volume_fov)
+                arrays = {"image": img3d}
+                if seg3d is not None:
+                    arrays["mask"] = mask_from_labels(seg3d, args.structures).astype(np.uint8)
+                (out_vol / scan.label).mkdir(parents=True, exist_ok=True)
+                np.savez_compressed(out_vol / scan.label / f"{safe(scan.subject)}__{safe(scan.scan)}.npz", **arrays)
+            return n
+
+    written, counts, failed = 0, {}, []
+    with ThreadPoolExecutor(max(args.workers, 1)) as pool:
+        futures = {pool.submit(process, sc): sc for sc in scans}
+        for i, fut in enumerate(as_completed(futures), 1):
+            scan = futures[fut]
+            try:
+                n = fut.result()
+            except Exception as e:  # keep going; report at the end
+                failed.append(f"{scan.scan}: {e}")
+                print(f"[{i}/{len(scans)}] {scan.scan} FAILED: {e}", flush=True)
+                continue
+            written += n
+            counts[scan.label] = counts.get(scan.label, 0) + 1
+            print(f"[{i}/{len(scans)}] {scan.subject} {scan.scan} -> {scan.label}"
+                  f"{'' if n else ' (already done)'}", flush=True)
+    print(f"{written} new slices; {sum(counts.values())} of {len(scans)} scans of "
+          f"{len({sc.subject for sc in scans})} subjects done; per class {counts} -> {root}")
+    if failed:
+        raise SystemExit(f"{len(failed)} scans failed, first: {failed[0]}")
+
+
+def write_subjects(scans: list[Scan], path: Path) -> None:
+    """Per-subject table (group, label, age, sex, ...) for tabular baselines in run_cv."""
+    keys = [k for k in SUBJECT_FIELDS if any(k in sc.info for sc in scans)]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["group", "scan", "label", *keys])
+        for sc in scans:
+            w.writerow([safe(sc.subject), sc.scan, sc.label, *[sc.info.get(k, "") for k in keys]])
 
 
 if __name__ == "__main__":
