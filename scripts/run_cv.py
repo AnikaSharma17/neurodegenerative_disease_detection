@@ -6,12 +6,16 @@ metrics swing by +/-0.1 between seeds. Here every patient is tested exactly once
 
   slice CNN   : multitask EfficientNet-B0, slice probabilities averaged per patient
   MIL         : attention-MIL over all slices of a patient (neurodx.mil)
-  baselines   : majority, logistic regression on histogram / thumbnail features
+  3D CNN      : whole-volume 3D ResNet (neurodx.cnn3d), if prepare_volumes wrote volumes
+  baselines   : majority, logistic regression on histogram / thumbnail features, and
+                for datasets with data/<d>/subjects.csv (OASIS): logistic regression on
+                age alone (a confound check) and on age + sex + nWBV + eTIV
 
 Resumable: folds that already have test_metrics.json are skipped. Writes
 results/CV_RESULTS.md and runs/<disease>/cv<k>_summary.json.
 
     python scripts/run_cv.py                      # both diseases, 5 folds
+    python scripts/run_cv.py --diseases oasis --models cnn mil cnn3d
     python scripts/run_cv.py --report-only
 """
 from __future__ import annotations
@@ -45,16 +49,22 @@ def run(cmd: list[str], log: Path) -> None:
         subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, check=True, cwd=ROOT)
 
 
-def train_folds(disease: str, folds: int, seed: int, runs: Path) -> None:
+CNN3D_ARGS = ["--epochs", "60", "--patience", "15", "--num-workers", "4", "--class-weighting",
+              "--batch-size", "8", "--seg-weight", "0.5"]
+
+
+def train_folds(disease: str, folds: int, seed: int, runs: Path, models=("cnn", "mil")) -> None:
     for fold in range(folds):
         jobs = {
-            f"multitask_efficientnet_b0_seg1_group_seed{seed}_cv{folds}f{fold}":
-                [sys.executable, "-m", "neurodx.train", "--disease", disease, "--batch-size", "32", *COMMON],
-            f"mil_efficientnet_b0_seed{seed}_cv{folds}f{fold}":
-                [sys.executable, "-m", "neurodx.mil", "--disease", disease, "--bags-per-batch", "4",
-                 "--bag-size", "16", *COMMON],
+            "cnn": (f"multitask_efficientnet_b0_seg1_group_seed{seed}_cv{folds}f{fold}",
+                    [sys.executable, "-m", "neurodx.train", "--disease", disease, "--batch-size", "32", *COMMON]),
+            "mil": (f"mil_efficientnet_b0_seed{seed}_cv{folds}f{fold}",
+                    [sys.executable, "-m", "neurodx.mil", "--disease", disease, "--bags-per-batch", "4",
+                     "--bag-size", "16", *COMMON]),
+            "cnn3d": (f"cnn3d_seg_seed{seed}_cv{folds}f{fold}",
+                      [sys.executable, "-m", "neurodx.cnn3d", "--disease", disease, *CNN3D_ARGS]),
         }
-        for name, cmd in jobs.items():
+        for name, cmd in (jobs[m] for m in models):
             if (runs / disease / name / "test_metrics.json").exists():
                 continue
             run(cmd + ["--seed", str(seed), "--cv-folds", str(folds), "--fold", str(fold)],
@@ -96,6 +106,7 @@ def baseline_patient_probs(disease: str, folds: int, seed: int, classes) -> dict
     from sklearn.preprocessing import StandardScaler
 
     nc = len(classes)
+    tabular = subject_features(ROOT / Path(cfg.image_root).parent / "subjects.csv")
     out: dict[str, dict] = defaultdict(lambda: {"probs": [], "labels": [], "groups": [], "folds": []})
     for fold in range(folds):
         sp = kfold_split(samples, folds, fold, 0.15, seed)
@@ -116,14 +127,54 @@ def baseline_patient_probs(disease: str, folds: int, seed: int, classes) -> dict
             o["labels"] += [samples[i].label for i in te]
             o["groups"] += [samples[i].group for i in te]
             o["folds"] += [fold] * len(te)
+        if tabular:  # one row per patient, same folds
+            tr_g = sorted({samples[i].group for i in tr})
+            te_g = sorted({samples[i].group for i in te})
+            lab = {s.group: s.label for s in samples}
+            for name, cols in TABULAR.items():
+                X_tr = np.array([tabular[g][cols] for g in tr_g])
+                clf = make_pipeline(StandardScaler(), LogisticRegression(max_iter=3000, class_weight="balanced"))
+                clf.fit(X_tr, [lab[g] for g in tr_g])
+                p = np.zeros((len(te_g), nc))
+                p[:, clf.classes_] = clf.predict_proba(np.array([tabular[g][cols] for g in te_g]))
+                o = out[name]
+                o["probs"].append(p)
+                o["labels"] += [lab[g] for g in te_g]
+                o["groups"] += te_g
+                o["folds"] += [fold] * len(te_g)
     result = {}
     for name, o in out.items():
         probs, labels = np.concatenate(o["probs"]), np.array(o["labels"])
         gp, gl, names = aggregate_by_group(probs, labels, o["groups"])
         fold_of = dict(zip(o["groups"], o["folds"]))
         cm = confusion_matrix(torch.from_numpy(probs.argmax(1)), torch.from_numpy(labels), nc)
-        result[name] = (gp, gl, names, np.array([fold_of[n] for n in names]), classification_metrics(cm, classes))
+        slice_m = classification_metrics(cm, classes) if len(o["groups"]) > len(names) else None
+        result[name] = (gp, gl, names, np.array([fold_of[n] for n in names]), slice_m)
     return result
+
+
+# Tabular baselines (column indices into subject_features rows): age, sex, nWBV, eTIV.
+TABULAR = {"logreg_age": [0], "logreg_age_sex_nWBV_eTIV": [0, 1, 2, 3]}
+
+
+def subject_features(path: Path) -> dict[str, np.ndarray]:
+    """``group -> [age, female, nWBV, eTIV]`` from prepare_volumes' subjects.csv; empty if absent.
+    Missing values are imputed with the column median."""
+    if not path.is_file():
+        return {}
+    rows = read_rows(path)
+
+    def num(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return np.nan
+
+    X = np.array([[num(r.get("Age")), float(str(r.get("M/F", "")).upper().startswith("F")),
+                   num(r.get("nWBV")), num(r.get("eTIV"))] for r in rows])
+    med = np.nanmedian(X, axis=0)
+    X = np.where(np.isnan(X), med, X)
+    return {r["group"]: x for r, x in zip(rows, X)}
 
 
 def patient_metrics(gp, gl, classes) -> dict:
@@ -162,7 +213,10 @@ def per_fold_f1(gp, gl, folds_arr, k, classes) -> list[float]:
     return [patient_metrics(gp[folds_arr == f], gl[folds_arr == f], classes)["macro_f1"] for f in range(k)]
 
 
-def report(diseases, folds: int, seed: int, runs: Path, out: Path) -> None:
+CNN3D = "3D CNN (whole volume, + seg loss)"
+
+
+def report(diseases, folds: int, seed: int, runs: Path, out: Path, report_name: str = "CV_RESULTS.md") -> None:
     md = ["# Cross-validated results", "",
           f"Generated by `python scripts/run_cv.py`. {folds}-fold patient-level cross-validation (seed {seed}):",
           "every patient (Alzheimer) or MRI series (Parkinson) is tested exactly once, and metrics are",
@@ -172,7 +226,8 @@ def report(diseases, folds: int, seed: int, runs: Path, out: Path) -> None:
         methods = dict(baseline_patient_probs(disease, folds, seed, classes))
         for label, prefix in (("slice CNN (EfficientNet-B0, mean of slices)",
                                f"multitask_efficientnet_b0_seg1_group_seed{seed}"),
-                              ("attention-MIL (EfficientNet-B0)", f"mil_efficientnet_b0_seed{seed}")):
+                              ("attention-MIL (EfficientNet-B0)", f"mil_efficientnet_b0_seed{seed}"),
+                              (CNN3D, f"cnn3d_seg_seed{seed}")):
             r = pooled_patient_probs(disease, prefix, folds, runs, classes)
             if r is not None:
                 methods[label] = r
@@ -200,7 +255,9 @@ def report(diseases, folds: int, seed: int, runs: Path, out: Path) -> None:
         md.append("")
         cnn = "slice CNN (EfficientNet-B0, mean of slices)"
         mil = "attention-MIL (EfficientNet-B0)"
-        comparisons = [(mil, cnn), (cnn, "logreg_histogram"), (cnn, "logreg_thumbnail"), (mil, "logreg_histogram")]
+        tab = "logreg_age_sex_nWBV_eTIV"
+        comparisons = [(mil, cnn), (cnn, "logreg_histogram"), (cnn, "logreg_thumbnail"), (mil, "logreg_histogram"),
+                       (CNN3D, cnn), (CNN3D, "logreg_histogram"), (CNN3D, tab), (cnn, tab), (cnn, "logreg_age")]
         lines = []
         for a, b in comparisons:
             if a in methods and b in methods:
@@ -212,7 +269,7 @@ def report(diseases, folds: int, seed: int, runs: Path, out: Path) -> None:
             md += ["Paired bootstrap differences (same resampled patients):", "", *lines, ""]
         (runs / disease / f"cv{folds}_summary.json").write_text(json.dumps(summary, indent=2, default=float))
     out.mkdir(parents=True, exist_ok=True)
-    (out / "CV_RESULTS.md").write_text("\n".join(md), encoding="utf-8")
+    (out / report_name).write_text("\n".join(md), encoding="utf-8")
     print("\n".join(md))
 
 
@@ -223,13 +280,15 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--runs", default="runs")
     p.add_argument("--out", default="results")
+    p.add_argument("--models", nargs="+", choices=("cnn", "mil", "cnn3d"), default=["cnn", "mil"])
+    p.add_argument("--report-name", default="CV_RESULTS.md")
     p.add_argument("--report-only", action="store_true")
     args = p.parse_args()
     runs = ROOT / args.runs
     if not args.report_only:
         for d in args.diseases:
-            train_folds(d, args.folds, args.seed, runs)
-    report(args.diseases, args.folds, args.seed, runs, ROOT / args.out)
+            train_folds(d, args.folds, args.seed, runs, args.models)
+    report(args.diseases, args.folds, args.seed, runs, ROOT / args.out, args.report_name)
 
 
 if __name__ == "__main__":
